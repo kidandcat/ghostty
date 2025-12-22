@@ -1,0 +1,98 @@
+name: Build Decktty
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app
+          xcodebuild -version
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Extract build info
+        id: build_info
+        run: |
+          DECKTTY_BUILD=$(git rev-list --count HEAD)
+          DECKTTY_COMMIT=$(git rev-parse --short HEAD)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            DECKTTY_VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            DECKTTY_VERSION="0.0.0-dev.${DECKTTY_BUILD}"
+          fi
+          echo "build=$DECKTTY_BUILD" >> $GITHUB_OUTPUT
+          echo "commit=$DECKTTY_COMMIT" >> $GITHUB_OUTPUT
+          echo "version=$DECKTTY_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build GhosttyKit (Zig)
+        env:
+          GHOSTTY_VERSION: ${{ steps.build_info.outputs.version }}
+        run: |
+          nix develop -c \
+            zig build \
+            -Doptimize=ReleaseFast \
+            -Demit-macos-app=false \
+            -Dversion-string=${GHOSTTY_VERSION}
+
+      - name: Build Decktty.app
+        env:
+          GHOSTTY_VERSION: ${{ steps.build_info.outputs.version }}
+          GHOSTTY_BUILD: ${{ steps.build_info.outputs.build }}
+          GHOSTTY_COMMIT: ${{ steps.build_info.outputs.commit }}
+        run: |
+          cd macos
+          xcodebuild \
+            -target Ghostty \
+            -configuration Release \
+            -derivedDataPath build \
+            GHOSTTY_VERSION=${GHOSTTY_VERSION} \
+            GHOSTTY_BUILD=${GHOSTTY_BUILD} \
+            GHOSTTY_COMMIT=${GHOSTTY_COMMIT} \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Package app
+        run: |
+          cd macos/build/Build/Products/Release
+          # Rename to Decktty
+          mv Ghostty.app Decktty.app || true
+          zip -r Decktty-${{ steps.build_info.outputs.version }}-macos.zip Decktty.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Decktty-${{ steps.build_info.outputs.version }}-macos
+          path: macos/build/Build/Products/Release/Decktty-*.zip
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: macos/build/Build/Products/Release/Decktty-*.zip
+          draft: false
+          prerelease: ${{ contains(github.ref, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
