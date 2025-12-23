@@ -200,6 +200,15 @@ extension Ghostty {
         var surface: ghostty_surface_t? {
             surfaceModel?.unsafeCValue
         }
+
+        /// Whether the terminal is at a shell prompt (waiting for input).
+        /// Returns `true` if the shell is idle, `false` if a command is running.
+        /// Requires shell integration (OSC 133). [Decktty fork addition]
+        var isAtPrompt: Bool {
+            guard let surface = surface else { return true }
+            return ghostty_surface_is_at_prompt(surface)
+        }
+
         /// Current scrollbar state, cached here for persistence across rebuilds
         /// of the SwiftUI view hierarchy, for example when changing splits
         var scrollbar: Ghostty.Action.Scrollbar?

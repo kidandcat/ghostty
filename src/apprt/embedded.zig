@@ -1579,6 +1579,17 @@ pub const CAPI = struct {
         return surface.core_surface.hasSelection();
     }
 
+    /// Returns true if the cursor is at a shell prompt (waiting for input).
+    /// Returns false if a command is currently running.
+    /// Requires shell integration (OSC 133) to work properly.
+    /// [Decktty fork addition - preserve when merging upstream]
+    export fn ghostty_surface_is_at_prompt(surface: *Surface) bool {
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lock();
+        defer core_surface.renderer_state.mutex.unlock();
+        return core_surface.io.terminal.cursorIsAtPrompt();
+    }
+
     /// Same as ghostty_surface_read_text but reads from the user selection,
     /// if any.
     export fn ghostty_surface_read_selection(

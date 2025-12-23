@@ -92,6 +92,17 @@ extension Ghostty {
             ghostty_surface_mouse_captured(surface)
         }
 
+        /// Whether the terminal is at a shell prompt (waiting for input).
+        ///
+        /// Returns `true` if the shell is idle and waiting for user input.
+        /// Returns `false` if a command is currently running.
+        /// Requires shell integration (OSC 133) to work properly.
+        /// [Decktty fork addition]
+        @MainActor
+        var isAtPrompt: Bool {
+            ghostty_surface_is_at_prompt(surface)
+        }
+
         /// Send a mouse button event to the terminal.
         ///
         /// This sends a complete mouse button event including the button state (press/release),

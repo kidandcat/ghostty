@@ -6,12 +6,14 @@ struct SidebarTabItem: Identifiable {
     let surfaceID: UUID
     let title: String
     let tabIndex: Int
+    let isBusy: Bool  // True when a command is running (not at prompt)
 
     init(surface: Ghostty.SurfaceView, index: Int) {
         self.id = surface.id
         self.surfaceID = surface.id
         self.title = surface.title
         self.tabIndex = index
+        self.isBusy = !surface.isAtPrompt  // Busy when NOT at prompt
     }
 }
 
@@ -92,6 +94,7 @@ struct TabSidebarView: View {
                         preview: previewManager.previews[item.surfaceID],
                         previewSize: itemSize,
                         isSelected: item.surfaceID == selectedSurfaceID,
+                        isBusy: item.isBusy,
                         onSelect: { onSelectTab(item.surfaceID) },
                         onClose: { onCloseTab(item.surfaceID) },
                         onNewTab: onNewTab
@@ -134,12 +137,18 @@ struct TabSidebarItemView: View {
     let preview: NSImage?
     let previewSize: CGSize
     let isSelected: Bool
+    let isBusy: Bool  // True when a command is running
     let onSelect: () -> Void
     let onClose: () -> Void
     let onNewTab: () -> Void
 
     @State private var isHovering = false
     @State private var isPulsing = false
+
+    /// Whether to show the pulse animation (busy + not selected)
+    private var shouldPulse: Bool {
+        isBusy && !isSelected
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -198,22 +207,20 @@ struct TabSidebarItemView: View {
             Button("New Tab", action: onNewTab)
         }
         .onAppear {
-            if !isSelected {
-                startPulsingAnimation()
-            }
+            updatePulsingState()
         }
-        .onChange(of: isSelected) { selected in
-            if !selected {
-                startPulsingAnimation()
-            } else {
-                isPulsing = false
-            }
+        .onChange(of: shouldPulse) { _ in
+            updatePulsingState()
         }
     }
 
-    private func startPulsingAnimation() {
-        withAnimation(Animation.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-            isPulsing = true
+    private func updatePulsingState() {
+        if shouldPulse {
+            withAnimation(Animation.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                isPulsing = true
+            }
+        } else {
+            isPulsing = false
         }
     }
 

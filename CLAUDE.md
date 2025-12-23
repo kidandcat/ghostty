@@ -28,7 +28,11 @@ macos/Sources/Features/Terminal/TerminalView.swift        # Preview capture supp
 macos/Sources/Ghostty/Ghostty.App.swift     # Tab sidebar state management
 macos/Sources/Ghostty/Ghostty.Config.swift  # Tab sidebar config options
 macos/Sources/Ghostty/Package.swift         # Package dependencies
+macos/Sources/Ghostty/Ghostty.Surface.swift # Added isAtPrompt property
+macos/Sources/Ghostty/SurfaceView_AppKit.swift # Added isAtPrompt property
 src/config/Config.zig                       # Tab sidebar config option
+src/apprt/embedded.zig                      # Added ghostty_surface_is_at_prompt() C API
+include/ghostty.h                           # Added ghostty_surface_is_at_prompt() declaration
 ```
 
 ## Merging from Upstream Ghostty
@@ -66,3 +70,18 @@ Follow the standard Ghostty build instructions in `HACKING.md`. The tab sidebar 
 - `TabPreviewManager.swift` - Manages capturing and caching terminal previews
 - Modified `TerminalView` and `TerminalController` to support preview capture
 - Config option in `Config.zig` to enable/disable the sidebar
+
+## Custom C API Additions
+
+### `ghostty_surface_is_at_prompt(surface)`
+
+Returns `true` if the terminal is waiting at a shell prompt, `false` if a command is running. This is used to show a "busy" pulse animation on tabs when commands are executing.
+
+**Requirements:** Shell integration must be enabled (OSC 133 escape sequences). Without shell integration, this always returns `false`.
+
+**Usage from Swift:**
+```swift
+let isWaiting = ghostty_surface_is_at_prompt(surface.unsafeCValue)
+// isWaiting == true  → shell is idle, waiting for input
+// isWaiting == false → command is running
+```
