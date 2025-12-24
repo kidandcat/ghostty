@@ -25,6 +25,9 @@
 
 ---
 
+<img width="1920" height="1053" alt="527190134-7b341382-6c71-49e0-b4c9-8966c35fa154" src="https://github.com/user-attachments/assets/b26b34fd-6d43-43ba-ae59-22190fb23302" />
+
+
 ## Features
 
 - **Deck View** - See all your terminals at once in a visual sidebar
