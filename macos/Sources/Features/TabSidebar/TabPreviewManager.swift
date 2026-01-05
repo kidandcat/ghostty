@@ -24,6 +24,12 @@ class TabPreviewManager: ObservableObject {
     /// Background queue for preview generation
     private let previewQueue = DispatchQueue(label: "com.ghostty.tabPreviewManager", qos: .userInitiated)
 
+    /// Track surfaces that have never had a successful capture for retry logic
+    private var failedCaptures: Set<UUID> = []
+
+    /// Maximum retries for initial capture
+    private let maxInitialRetries = 10
+
     /// Initializes the preview manager with a specified thumbnail width.
     /// - Parameter thumbnailWidth: The width of generated thumbnails in points. Height is calculated to maintain aspect ratio.
     init(thumbnailWidth: CGFloat = 180) {
@@ -77,17 +83,27 @@ class TabPreviewManager: ObservableObject {
             guard let self = self else { return }
 
             var newPreviews: [UUID: NSImage] = [:]
+            var stillFailed: Set<UUID> = []
 
             for surface in surfacesToCapture {
                 // Must capture screenshot on main thread
                 var screenshot: NSImage?
                 DispatchQueue.main.sync {
+                    // Try primary screenshot method
                     screenshot = surface.screenshot()
+
+                    // If primary method fails and we don't have a preview yet, try fallback
+                    if screenshot == nil && self.previews[surface.id] == nil {
+                        screenshot = self.captureViaLayer(surface)
+                    }
                 }
 
                 // Use full resolution screenshot for better quality
                 if let fullImage = screenshot {
                     newPreviews[surface.id] = fullImage
+                } else if self.previews[surface.id] == nil {
+                    // Track surfaces that still don't have a preview
+                    stillFailed.insert(surface.id)
                 }
             }
 
@@ -95,9 +111,45 @@ class TabPreviewManager: ObservableObject {
                 // Only update changed previews to minimize UI updates
                 for (id, image) in newPreviews {
                     self.previews[id] = image
+                    self.failedCaptures.remove(id)
                 }
+                // Update failed captures set
+                self.failedCaptures = stillFailed
             }
         }
+    }
+
+    /// Fallback capture method using layer rendering
+    private func captureViaLayer(_ view: NSView) -> NSImage? {
+        guard let layer = view.layer else { return nil }
+        let size = view.bounds.size
+        guard size.width > 0 && size.height > 0 else { return nil }
+
+        let scale = view.window?.backingScaleFactor ?? 2.0
+        let pixelSize = CGSize(width: size.width * scale, height: size.height * scale)
+
+        guard let bitmapRep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(pixelSize.width),
+            pixelsHigh: Int(pixelSize.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+
+        guard let context = NSGraphicsContext(bitmapImageRep: bitmapRep) else { return nil }
+
+        let cgContext = context.cgContext
+        cgContext.scaleBy(x: scale, y: scale)
+        layer.render(in: cgContext)
+
+        let image = NSImage(size: size)
+        image.addRepresentation(bitmapRep)
+        return image
     }
 
     /// Creates a scaled-down thumbnail from the full-size image.

@@ -22,15 +22,27 @@ extension NSView {
     /// Take a screenshot of just this view.
     /// Uses CGWindowListCreateImage for Metal-backed views which don't support bitmapImageRepForCachingDisplay.
     func screenshot() -> NSImage? {
+        // Ensure view has valid size
+        guard bounds.width > 0 && bounds.height > 0 else { return nil }
+
         // For views in a window, use CGWindowListCreateImage which works with Metal
         if let window = self.window, let cgWindowId = window.cgWindowId {
+            // Ensure window is visible and on screen
+            guard window.isVisible, !window.isMiniaturized else { return nil }
+
             // Convert view bounds to screen coordinates
             let viewFrameInWindow = convert(bounds, to: nil)
             let viewFrameOnScreen = window.convertToScreen(viewFrameInWindow)
 
+            // Ensure we have a valid frame on screen
+            guard viewFrameOnScreen.width > 0 && viewFrameOnScreen.height > 0 else { return nil }
+
             // CGWindowListCreateImage uses top-left origin coordinate system
-            guard let mainScreen = NSScreen.main else { return nil }
-            let flippedY = mainScreen.frame.maxY - viewFrameOnScreen.maxY
+            // Use the screen containing the window, not just main screen
+            let screen = window.screen ?? NSScreen.main
+            guard let screenFrame = screen?.frame else { return nil }
+
+            let flippedY = screenFrame.maxY - viewFrameOnScreen.maxY
             let captureRect = CGRect(
                 x: viewFrameOnScreen.origin.x,
                 y: flippedY,
@@ -38,15 +50,36 @@ extension NSView {
                 height: viewFrameOnScreen.height
             )
 
-            // Capture just this window's content in the specified rect
-            guard let cgImage = CGWindowListCreateImage(
+            // Try capturing just this window's content in the specified rect
+            if let cgImage = CGWindowListCreateImage(
                 captureRect,
                 .optionIncludingWindow,
                 cgWindowId,
                 [.boundsIgnoreFraming, .nominalResolution]
-            ) else { return nil }
+            ) {
+                return NSImage(cgImage: cgImage, size: bounds.size)
+            }
 
-            return NSImage(cgImage: cgImage, size: bounds.size)
+            // Fallback: try capturing without bounds (full window) and crop
+            if let cgImage = CGWindowListCreateImage(
+                .null,
+                .optionIncludingWindow,
+                cgWindowId,
+                [.boundsIgnoreFraming, .nominalResolution]
+            ) {
+                // Crop to view bounds within window
+                let windowBounds = window.frame
+                let scale = CGFloat(cgImage.width) / windowBounds.width
+                let cropRect = CGRect(
+                    x: viewFrameInWindow.origin.x * scale,
+                    y: (windowBounds.height - viewFrameInWindow.maxY) * scale,
+                    width: viewFrameInWindow.width * scale,
+                    height: viewFrameInWindow.height * scale
+                )
+                if let croppedImage = cgImage.cropping(to: cropRect) {
+                    return NSImage(cgImage: croppedImage, size: bounds.size)
+                }
+            }
         }
 
         // Fallback for views not in a window

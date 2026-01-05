@@ -56,12 +56,11 @@ struct TabSidebarView: View {
         let cols = columnCount
         let rows = Int(ceil(Double(tabItems.count) / Double(cols)))
 
-        let horizontalPadding: CGFloat = 16 // 8 on each side
-        let verticalPadding: CGFloat = 24   // 12 on top and bottom
-        let spacing: CGFloat = 8
-        let buttonHeight: CGFloat = 50      // New Tab button area
-        let titleHeight: CGFloat = 24       // Title + spacing
-        let itemPadding: CGFloat = 12       // 6 on each side
+        let horizontalPadding: CGFloat = 8  // 4 on each side
+        let verticalPadding: CGFloat = 8    // 4 on top and bottom
+        let spacing: CGFloat = 6
+        let titleHeight: CGFloat = 20       // Title + spacing
+        let itemPadding: CGFloat = 8        // 4 on each side
 
         // Calculate available width per item
         let totalHSpacing = spacing * CGFloat(cols - 1)
@@ -70,7 +69,7 @@ struct TabSidebarView: View {
 
         // Calculate available height per item
         let totalVSpacing = spacing * CGFloat(rows - 1)
-        let availableHeight = sidebarHeight - verticalPadding - buttonHeight - totalVSpacing
+        let availableHeight = sidebarHeight - verticalPadding - totalVSpacing
         let itemHeight = availableHeight / CGFloat(rows)
 
         // Preview height is item height minus title and padding
@@ -81,47 +80,27 @@ struct TabSidebarView: View {
     }
 
     private var columns: [GridItem] {
-        return Array(repeating: GridItem(.flexible(), spacing: 8), count: columnCount)
+        return Array(repeating: GridItem(.flexible(), spacing: 6), count: columnCount)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Tab grid (no scroll - items sized to fit)
-            LazyVGrid(columns: columns, spacing: 8) {
-                ForEach(tabItems) { item in
-                    TabSidebarItemView(
-                        item: item,
-                        preview: previewManager.previews[item.surfaceID],
-                        previewSize: itemSize,
-                        isSelected: item.surfaceID == selectedSurfaceID,
-                        isBusy: item.isBusy,
-                        onSelect: { onSelectTab(item.surfaceID) },
-                        onClose: { onCloseTab(item.surfaceID) },
-                        onNewTab: onNewTab
-                    )
-                }
+        // Tab grid fills entire sidebar
+        LazyVGrid(columns: columns, spacing: 6) {
+            ForEach(tabItems) { item in
+                TabSidebarItemView(
+                    item: item,
+                    preview: previewManager.previews[item.surfaceID],
+                    previewSize: itemSize,
+                    isSelected: item.surfaceID == selectedSurfaceID,
+                    isBusy: item.isBusy,
+                    onSelect: { onSelectTab(item.surfaceID) },
+                    onClose: { onCloseTab(item.surfaceID) },
+                    onNewTab: onNewTab
+                )
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 12)
-
-            Spacer()
-
-            Divider()
-
-            // New tab button at the bottom
-            Button(action: onNewTab) {
-                HStack {
-                    Image(systemName: "plus")
-                    Text("New Tab")
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-            }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 8)
-            .padding(.bottom, 8)
         }
-        .frame(width: sidebarWidth)
+        .padding(4)
+        .frame(width: sidebarWidth, height: sidebarHeight)
         .background(
             ghostty.config.backgroundColor
                 // Make sidebar 50% less transparent than terminal
@@ -193,7 +172,7 @@ struct TabSidebarItemView: View {
                 .truncationMode(.tail)
                 .foregroundColor(isSelected ? .primary : .secondary)
         }
-        .padding(6)
+        .padding(4)
         .background(selectionBackground)
         .overlay(selectionBorder)
         .contentShape(Rectangle())
