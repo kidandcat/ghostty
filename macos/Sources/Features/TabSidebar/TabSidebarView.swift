@@ -274,7 +274,7 @@ struct TabSidebarItemView: View {
                         ? Color.orange.opacity(isPulsing ? 0.15 : 0.05)
                         : Color.clear)
             )
-            .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
+            .animation(showAttention ? .easeInOut(duration: 0.6).repeatForever(autoreverses: true) : .default, value: isPulsing)
     }
 
     private var selectionBorder: some View {
@@ -288,7 +288,7 @@ struct TabSidebarItemView: View {
                 lineWidth: isSelected ? 2.5 : (showAttention ? 2.5 : 1.0)
             )
             .shadow(color: showAttention ? Color.orange.opacity(isPulsing ? 0.6 : 0.2) : Color.clear, radius: isPulsing ? 8 : 4)
-            .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
+            .animation(showAttention ? .easeInOut(duration: 0.6).repeatForever(autoreverses: true) : .default, value: isPulsing)
     }
 }
 

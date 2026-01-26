@@ -15,8 +15,11 @@ class TabPreviewManager: ObservableObject {
     /// Preview images keyed by surface ID
     @Published private(set) var previews: [UUID: NSImage] = [:]
 
-    /// Surfaces that need attention (idle for more than idleThreshold seconds)
+    /// Surfaces that need attention (were active while unfocused, then became idle)
     @Published private(set) var needsAttention: Set<UUID> = []
+
+    /// Currently focused surface ID - must be updated by caller
+    private(set) var focusedSurfaceId: UUID?
 
     /// The surfaces being tracked for preview generation
     private var surfaces: [Ghostty.SurfaceView] = []
@@ -41,6 +44,15 @@ class TabPreviewManager: ObservableObject {
 
     /// Timestamp of last content change for each surface
     private var lastChangeTime: [UUID: Date] = [:]
+
+    /// Surfaces that had activity while not focused (eligible for attention when idle)
+    private var hadActivityWhileUnfocused: Set<UUID> = []
+
+    /// Last time we checked hash for each surface (to avoid checking every frame)
+    private var lastHashCheckTime: [UUID: Date] = [:]
+
+    /// How often to check for content changes (in seconds)
+    private static let hashCheckInterval: TimeInterval = 5.0
 
     /// Initializes the preview manager with a specified thumbnail width.
     /// - Parameter thumbnailWidth: The width of generated thumbnails in points. Height is calculated to maintain aspect ratio.
@@ -74,13 +86,28 @@ class TabPreviewManager: ObservableObject {
         previews = previews.filter { surfaceIds.contains($0.key) }
         lastContentHash = lastContentHash.filter { surfaceIds.contains($0.key) }
         lastChangeTime = lastChangeTime.filter { surfaceIds.contains($0.key) }
+        lastHashCheckTime = lastHashCheckTime.filter { surfaceIds.contains($0.key) }
         needsAttention = needsAttention.intersection(surfaceIds)
+        hadActivityWhileUnfocused = hadActivityWhileUnfocused.intersection(surfaceIds)
+    }
+
+    /// Updates the currently focused surface. Call this when focus changes.
+    /// This clears attention state for the newly focused surface.
+    func setFocusedSurface(_ surfaceId: UUID?) {
+        focusedSurfaceId = surfaceId
+
+        // Clear all attention-related state for the newly focused surface
+        if let id = surfaceId {
+            needsAttention.remove(id)
+            hadActivityWhileUnfocused.remove(id)
+            lastChangeTime[id] = Date()
+        }
     }
 
     /// Clears the "needs attention" state for a surface (e.g., when user selects it)
     func clearNeedsAttention(for surfaceId: UUID) {
         needsAttention.remove(surfaceId)
-        // Reset the change time so it doesn't immediately trigger again
+        hadActivityWhileUnfocused.remove(surfaceId)
         lastChangeTime[surfaceId] = Date()
     }
 
@@ -106,7 +133,6 @@ class TabPreviewManager: ObservableObject {
 
             var newPreviews: [UUID: NSImage] = [:]
             var stillFailed: Set<UUID> = []
-            var contentHashes: [UUID: Int] = [:]
 
             for surface in surfacesToCapture {
                 // Must capture screenshot on main thread
@@ -121,13 +147,9 @@ class TabPreviewManager: ObservableObject {
                     }
                 }
 
-                // Use full resolution screenshot for better quality
                 if let fullImage = screenshot {
                     newPreviews[surface.id] = fullImage
-                    // Compute a hash of the image to detect changes
-                    contentHashes[surface.id] = self.computeImageHash(fullImage)
                 } else if self.previews[surface.id] == nil {
-                    // Track surfaces that still don't have a preview
                     stillFailed.insert(surface.id)
                 }
             }
@@ -135,72 +157,100 @@ class TabPreviewManager: ObservableObject {
             DispatchQueue.main.async {
                 let now = Date()
                 var updatedNeedsAttention = self.needsAttention
+                let focusedId = self.focusedSurfaceId
 
-                // Only update changed previews to minimize UI updates
                 for (id, image) in newPreviews {
                     self.previews[id] = image
                     self.failedCaptures.remove(id)
 
-                    // Check if content changed
-                    let newHash = contentHashes[id] ?? 0
-                    let oldHash = self.lastContentHash[id] ?? 0
+                    // Skip focused surface - it never needs attention
+                    let isUnfocused = (id != focusedId)
 
-                    if newHash != oldHash {
-                        // Content changed - update hash and timestamp
-                        self.lastContentHash[id] = newHash
-                        self.lastChangeTime[id] = now
-                        // No longer needs attention since it's active
-                        updatedNeedsAttention.remove(id)
-                    } else {
-                        // Content unchanged - check if idle long enough
-                        if let lastChange = self.lastChangeTime[id] {
-                            let idleTime = now.timeIntervalSince(lastChange)
-                            if idleTime >= Self.idleThreshold {
-                                updatedNeedsAttention.insert(id)
-                            }
-                        } else {
-                            // First time seeing this surface, initialize timestamp
+                    // Only check hash every hashCheckInterval seconds to save CPU
+                    let lastCheck = self.lastHashCheckTime[id] ?? .distantPast
+                    let timeSinceLastCheck = now.timeIntervalSince(lastCheck)
+
+                    if timeSinceLastCheck >= Self.hashCheckInterval {
+                        self.lastHashCheckTime[id] = now
+
+                        // Compute hash and check for changes
+                        let newHash = self.computeImageHash(image)
+                        let hadPreviousHash = self.lastContentHash[id] != nil
+                        let oldHash = self.lastContentHash[id] ?? 0
+
+                        if newHash != oldHash {
+                            // Content changed
+                            self.lastContentHash[id] = newHash
                             self.lastChangeTime[id] = now
+
+                            // Only count as "activity" if we had a previous hash
+                            // (ignore first reading to avoid false positives)
+                            if isUnfocused && hadPreviousHash {
+                                self.hadActivityWhileUnfocused.insert(id)
+                            }
+                            updatedNeedsAttention.remove(id)
+                        } else if hadPreviousHash {
+                            // Content unchanged - check if idle AND had activity
+                            if let lastChange = self.lastChangeTime[id] {
+                                let idleTime = now.timeIntervalSince(lastChange)
+                                if idleTime >= Self.idleThreshold
+                                    && isUnfocused
+                                    && self.hadActivityWhileUnfocused.contains(id) {
+                                    updatedNeedsAttention.insert(id)
+                                }
+                            }
                         }
                     }
                 }
 
-                // Update needs attention set
                 self.needsAttention = updatedNeedsAttention
-
-                // Update failed captures set
                 self.failedCaptures = stillFailed
             }
         }
     }
 
-    /// Computes a simple hash of the image content for change detection
+    /// Computes a hash of the image content for change detection
+    /// Uses direct pixel sampling to avoid creating large data copies
     private func computeImageHash(_ image: NSImage) -> Int {
-        guard let tiffData = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiffData) else {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              cgImage.width > 0 && cgImage.height > 0 else {
             return 0
         }
 
-        // Sample a grid of pixels to create a fast hash
-        let width = bitmap.pixelsWide
-        let height = bitmap.pixelsHigh
-        guard width > 0 && height > 0 else { return 0 }
+        // Create a small context to sample pixels efficiently
+        // 32x32 = 1024 samples, enough to detect small changes like spinners
+        let sampleSize = 32
+        let bitsPerComponent = 8
+        let bytesPerRow = sampleSize * 4
 
+        guard let context = CGContext(
+            data: nil,
+            width: sampleSize,
+            height: sampleSize,
+            bitsPerComponent: bitsPerComponent,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return 0
+        }
+
+        // Draw scaled-down version
+        context.interpolationQuality = .low
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: sampleSize, height: sampleSize))
+
+        guard let data = context.data else { return 0 }
+
+        // Hash the pixel data directly
         var hash = 0
-        // Sample a 4x4 grid of pixels
-        let stepX = max(1, width / 4)
-        let stepY = max(1, height / 4)
+        let pixels = data.assumingMemoryBound(to: UInt8.self)
+        let totalBytes = sampleSize * sampleSize * 4
 
-        for y in stride(from: 0, to: height, by: stepY) {
-            for x in stride(from: 0, to: width, by: stepX) {
-                if let color = bitmap.colorAt(x: x, y: y) {
-                    // Combine RGB values into hash
-                    let r = Int(color.redComponent * 255)
-                    let g = Int(color.greenComponent * 255)
-                    let b = Int(color.blueComponent * 255)
-                    hash = hash &* 31 &+ r &+ g &+ b
-                }
-            }
+        for i in stride(from: 0, to: totalBytes, by: 4) {
+            // Sample RGB, skip alpha
+            hash = hash &* 31 &+ Int(pixels[i])
+            hash = hash &* 31 &+ Int(pixels[i + 1])
+            hash = hash &* 31 &+ Int(pixels[i + 2])
         }
 
         return hash
