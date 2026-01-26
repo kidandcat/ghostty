@@ -9,8 +9,14 @@ class TabPreviewManager: ObservableObject {
     static let targetFPS: Double = 5.0
     private let updateInterval: TimeInterval = 1.0 / targetFPS
 
+    /// How long a terminal must be idle before it "needs attention" (in seconds)
+    static let idleThreshold: TimeInterval = 5.0
+
     /// Preview images keyed by surface ID
     @Published private(set) var previews: [UUID: NSImage] = [:]
+
+    /// Surfaces that need attention (idle for more than idleThreshold seconds)
+    @Published private(set) var needsAttention: Set<UUID> = []
 
     /// The surfaces being tracked for preview generation
     private var surfaces: [Ghostty.SurfaceView] = []
@@ -29,6 +35,12 @@ class TabPreviewManager: ObservableObject {
 
     /// Maximum retries for initial capture
     private let maxInitialRetries = 10
+
+    /// Last content hash for each surface (to detect changes)
+    private var lastContentHash: [UUID: Int] = [:]
+
+    /// Timestamp of last content change for each surface
+    private var lastChangeTime: [UUID: Date] = [:]
 
     /// Initializes the preview manager with a specified thumbnail width.
     /// - Parameter thumbnailWidth: The width of generated thumbnails in points. Height is calculated to maintain aspect ratio.
@@ -57,9 +69,19 @@ class TabPreviewManager: ObservableObject {
     /// - Parameter surfaces: The new list of surfaces to track.
     func updateSurfaces(_ surfaces: [Ghostty.SurfaceView]) {
         self.surfaces = surfaces
-        // Remove previews for surfaces that no longer exist
+        // Remove data for surfaces that no longer exist
         let surfaceIds = Set(surfaces.map { $0.id })
         previews = previews.filter { surfaceIds.contains($0.key) }
+        lastContentHash = lastContentHash.filter { surfaceIds.contains($0.key) }
+        lastChangeTime = lastChangeTime.filter { surfaceIds.contains($0.key) }
+        needsAttention = needsAttention.intersection(surfaceIds)
+    }
+
+    /// Clears the "needs attention" state for a surface (e.g., when user selects it)
+    func clearNeedsAttention(for surfaceId: UUID) {
+        needsAttention.remove(surfaceId)
+        // Reset the change time so it doesn't immediately trigger again
+        lastChangeTime[surfaceId] = Date()
     }
 
     // MARK: - Private Methods
@@ -84,6 +106,7 @@ class TabPreviewManager: ObservableObject {
 
             var newPreviews: [UUID: NSImage] = [:]
             var stillFailed: Set<UUID> = []
+            var contentHashes: [UUID: Int] = [:]
 
             for surface in surfacesToCapture {
                 // Must capture screenshot on main thread
@@ -101,6 +124,8 @@ class TabPreviewManager: ObservableObject {
                 // Use full resolution screenshot for better quality
                 if let fullImage = screenshot {
                     newPreviews[surface.id] = fullImage
+                    // Compute a hash of the image to detect changes
+                    contentHashes[surface.id] = self.computeImageHash(fullImage)
                 } else if self.previews[surface.id] == nil {
                     // Track surfaces that still don't have a preview
                     stillFailed.insert(surface.id)
@@ -108,15 +133,77 @@ class TabPreviewManager: ObservableObject {
             }
 
             DispatchQueue.main.async {
+                let now = Date()
+                var updatedNeedsAttention = self.needsAttention
+
                 // Only update changed previews to minimize UI updates
                 for (id, image) in newPreviews {
                     self.previews[id] = image
                     self.failedCaptures.remove(id)
+
+                    // Check if content changed
+                    let newHash = contentHashes[id] ?? 0
+                    let oldHash = self.lastContentHash[id] ?? 0
+
+                    if newHash != oldHash {
+                        // Content changed - update hash and timestamp
+                        self.lastContentHash[id] = newHash
+                        self.lastChangeTime[id] = now
+                        // No longer needs attention since it's active
+                        updatedNeedsAttention.remove(id)
+                    } else {
+                        // Content unchanged - check if idle long enough
+                        if let lastChange = self.lastChangeTime[id] {
+                            let idleTime = now.timeIntervalSince(lastChange)
+                            if idleTime >= Self.idleThreshold {
+                                updatedNeedsAttention.insert(id)
+                            }
+                        } else {
+                            // First time seeing this surface, initialize timestamp
+                            self.lastChangeTime[id] = now
+                        }
+                    }
                 }
+
+                // Update needs attention set
+                self.needsAttention = updatedNeedsAttention
+
                 // Update failed captures set
                 self.failedCaptures = stillFailed
             }
         }
+    }
+
+    /// Computes a simple hash of the image content for change detection
+    private func computeImageHash(_ image: NSImage) -> Int {
+        guard let tiffData = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData) else {
+            return 0
+        }
+
+        // Sample a grid of pixels to create a fast hash
+        let width = bitmap.pixelsWide
+        let height = bitmap.pixelsHigh
+        guard width > 0 && height > 0 else { return 0 }
+
+        var hash = 0
+        // Sample a 4x4 grid of pixels
+        let stepX = max(1, width / 4)
+        let stepY = max(1, height / 4)
+
+        for y in stride(from: 0, to: height, by: stepY) {
+            for x in stride(from: 0, to: width, by: stepX) {
+                if let color = bitmap.colorAt(x: x, y: y) {
+                    // Combine RGB values into hash
+                    let r = Int(color.redComponent * 255)
+                    let g = Int(color.greenComponent * 255)
+                    let b = Int(color.blueComponent * 255)
+                    hash = hash &* 31 &+ r &+ g &+ b
+                }
+            }
+        }
+
+        return hash
     }
 
     /// Fallback capture method using layer rendering

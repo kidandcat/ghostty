@@ -6,14 +6,14 @@ struct SidebarTabItem: Identifiable {
     let surfaceID: UUID
     let title: String
     let tabIndex: Int
-    let isBusy: Bool  // True when a command is running (not at prompt)
+    let needsAttention: Bool  // True when terminal has been idle (waiting for input)
 
-    init(surface: Ghostty.SurfaceView, index: Int) {
+    init(surface: Ghostty.SurfaceView, index: Int, needsAttention: Bool = false) {
         self.id = surface.id
         self.surfaceID = surface.id
         self.title = surface.title
         self.tabIndex = index
-        self.isBusy = !surface.isAtPrompt  // Busy when NOT at prompt
+        self.needsAttention = needsAttention
     }
 }
 
@@ -92,8 +92,11 @@ struct TabSidebarView: View {
                     preview: previewManager.previews[item.surfaceID],
                     previewSize: itemSize,
                     isSelected: item.surfaceID == selectedSurfaceID,
-                    isBusy: item.isBusy,
-                    onSelect: { onSelectTab(item.surfaceID) },
+                    needsAttention: item.needsAttention,
+                    onSelect: {
+                        previewManager.clearNeedsAttention(for: item.surfaceID)
+                        onSelectTab(item.surfaceID)
+                    },
                     onClose: { onCloseTab(item.surfaceID) },
                     onNewTab: onNewTab
                 )
@@ -116,7 +119,7 @@ struct TabSidebarItemView: View {
     let preview: NSImage?
     let previewSize: CGSize
     let isSelected: Bool
-    let isBusy: Bool  // True when a command is running
+    let needsAttention: Bool  // True when terminal is idle and waiting for input
     let onSelect: () -> Void
     let onClose: () -> Void
     let onNewTab: () -> Void
@@ -124,56 +127,91 @@ struct TabSidebarItemView: View {
     @State private var isHovering = false
     @State private var isPulsing = false
 
-    /// Whether to show the pulse animation (busy + not selected)
-    private var shouldPulse: Bool {
-        isBusy && !isSelected
+    /// Whether to show the attention indicator (needs attention + not selected)
+    private var showAttention: Bool {
+        needsAttention && !isSelected
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // Preview thumbnail
-            ZStack(alignment: .topTrailing) {
+            // Preview thumbnail with attention overlay
+            ZStack {
+                // Base preview image
                 previewImage
                     .frame(width: previewSize.width, height: previewSize.height)
                     .clipped()
                     .cornerRadius(6)
 
-                // Tab number badge (top right) - only show for tabs 1-9
-                if item.tabIndex < 9 {
-                    Text("\(item.tabIndex + 1)")
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(Color.black.opacity(0.6))
+                // Attention overlay - dark tint with bell icon
+                if showAttention {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.black.opacity(isPulsing ? 0.5 : 0.3))
+                        .frame(width: previewSize.width, height: previewSize.height)
+                        .overlay(
+                            Image(systemName: "bell.fill")
+                                .font(.system(size: min(previewSize.width, previewSize.height) * 0.3))
+                                .foregroundColor(.orange)
+                                .shadow(color: .orange.opacity(0.8), radius: isPulsing ? 12 : 6)
+                                .scaleEffect(isPulsing ? 1.1 : 0.9)
                         )
-                        .padding(4)
-                        .opacity(isHovering ? 0 : 1) // Hide when close button is shown
+                        .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
                 }
 
-                // Close button shown on hover
-                if isHovering {
-                    Button(action: onClose) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.white)
-                            .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                // Top-right badges and buttons
+                VStack {
+                    HStack {
+                        // Attention badge (top left) - red notification dot
+                        if showAttention {
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 12, height: 12)
+                                .shadow(color: .red.opacity(0.8), radius: isPulsing ? 6 : 2)
+                                .scaleEffect(isPulsing ? 1.2 : 1.0)
+                                .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
+                                .padding(4)
+                        }
+
+                        Spacer()
+
+                        // Tab number badge (top right) - only show for tabs 1-9
+                        if item.tabIndex < 9 && !isHovering {
+                            Text("\(item.tabIndex + 1)")
+                                .font(.system(size: 10, weight: .bold, design: .rounded))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.black.opacity(0.6))
+                                )
+                                .padding(4)
+                        }
+
+                        // Close button shown on hover
+                        if isHovering {
+                            Button(action: onClose) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.white)
+                                    .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(4)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .padding(4)
+                    Spacer()
                 }
             }
 
-            // Tab title
+            // Tab title - orange when needs attention
             Text(displayTitle)
                 .font(.caption)
+                .fontWeight(showAttention ? .semibold : .regular)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .foregroundColor(isSelected ? .primary : .secondary)
+                .foregroundColor(showAttention ? .orange : (isSelected ? .primary : .secondary))
         }
         .padding(4)
-        .background(selectionBackground)
+        .background(attentionBackground)
         .overlay(selectionBorder)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
@@ -188,18 +226,20 @@ struct TabSidebarItemView: View {
         .onAppear {
             updatePulsingState()
         }
-        .onChange(of: shouldPulse) { _ in
+        .onChange(of: showAttention) { _ in
             updatePulsingState()
         }
     }
 
     private func updatePulsingState() {
-        if shouldPulse {
-            withAnimation(Animation.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+        if showAttention {
+            withAnimation(Animation.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) {
                 isPulsing = true
             }
         } else {
-            isPulsing = false
+            withAnimation(.none) {
+                isPulsing = false
+            }
         }
     }
 
@@ -225,20 +265,30 @@ struct TabSidebarItemView: View {
         item.title.isEmpty ? "Terminal" : item.title
     }
 
-    private var selectionBackground: some View {
+    private var attentionBackground: some View {
         RoundedRectangle(cornerRadius: 8)
-            .fill(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
+            .fill(
+                isSelected
+                    ? Color.accentColor.opacity(0.2)
+                    : (showAttention
+                        ? Color.orange.opacity(isPulsing ? 0.15 : 0.05)
+                        : Color.clear)
+            )
+            .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
     }
 
     private var selectionBorder: some View {
         RoundedRectangle(cornerRadius: 8)
             .strokeBorder(
                 isSelected
-                    ? Color.accentColor  // Selected: solid accent color
-                    : Color.accentColor.opacity(isPulsing ? 0.6 : 0.2),  // Unselected: pulsing blue
-                lineWidth: isSelected ? 2.5 : (isPulsing ? 1.5 : 1.0)
+                    ? Color.accentColor
+                    : (showAttention
+                        ? Color.orange.opacity(isPulsing ? 1.0 : 0.6)
+                        : Color.gray.opacity(0.2)),
+                lineWidth: isSelected ? 2.5 : (showAttention ? 2.5 : 1.0)
             )
-            .animation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true), value: isPulsing)
+            .shadow(color: showAttention ? Color.orange.opacity(isPulsing ? 0.6 : 0.2) : Color.clear, radius: isPulsing ? 8 : 4)
+            .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
     }
 }
 
