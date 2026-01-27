@@ -51,8 +51,14 @@ class TabPreviewManager: ObservableObject {
     /// Last time we checked hash for each surface (to avoid checking every frame)
     private var lastHashCheckTime: [UUID: Date] = [:]
 
+    /// Count of consecutive unchanged hash checks per surface
+    private var unchangedHashCount: [UUID: Int] = [:]
+
     /// How often to check for content changes (in seconds)
     private static let hashCheckInterval: TimeInterval = 5.0
+
+    /// Number of consecutive unchanged checks required before showing attention
+    private static let requiredUnchangedChecks: Int = 2
 
     /// Initializes the preview manager with a specified thumbnail width.
     /// - Parameter thumbnailWidth: The width of generated thumbnails in points. Height is calculated to maintain aspect ratio.
@@ -87,6 +93,7 @@ class TabPreviewManager: ObservableObject {
         lastContentHash = lastContentHash.filter { surfaceIds.contains($0.key) }
         lastChangeTime = lastChangeTime.filter { surfaceIds.contains($0.key) }
         lastHashCheckTime = lastHashCheckTime.filter { surfaceIds.contains($0.key) }
+        unchangedHashCount = unchangedHashCount.filter { surfaceIds.contains($0.key) }
         needsAttention = needsAttention.intersection(surfaceIds)
         hadActivityWhileUnfocused = hadActivityWhileUnfocused.intersection(surfaceIds)
     }
@@ -108,6 +115,7 @@ class TabPreviewManager: ObservableObject {
     func clearNeedsAttention(for surfaceId: UUID) {
         needsAttention.remove(surfaceId)
         hadActivityWhileUnfocused.remove(surfaceId)
+        unchangedHashCount[surfaceId] = 0
         lastChangeTime[surfaceId] = Date()
     }
 
@@ -179,9 +187,10 @@ class TabPreviewManager: ObservableObject {
                         let oldHash = self.lastContentHash[id] ?? 0
 
                         if newHash != oldHash {
-                            // Content changed
+                            // Content changed - reset unchanged counter
                             self.lastContentHash[id] = newHash
                             self.lastChangeTime[id] = now
+                            self.unchangedHashCount[id] = 0
 
                             // Only count as "activity" if we had a previous hash
                             // (ignore first reading to avoid false positives)
@@ -190,14 +199,15 @@ class TabPreviewManager: ObservableObject {
                             }
                             updatedNeedsAttention.remove(id)
                         } else if hadPreviousHash {
-                            // Content unchanged - check if idle AND had activity
-                            if let lastChange = self.lastChangeTime[id] {
-                                let idleTime = now.timeIntervalSince(lastChange)
-                                if idleTime >= Self.idleThreshold
-                                    && isUnfocused
-                                    && self.hadActivityWhileUnfocused.contains(id) {
-                                    updatedNeedsAttention.insert(id)
-                                }
+                            // Content unchanged - increment counter
+                            let count = (self.unchangedHashCount[id] ?? 0) + 1
+                            self.unchangedHashCount[id] = count
+
+                            // Only show attention after multiple consecutive unchanged checks
+                            if count >= Self.requiredUnchangedChecks
+                                && isUnfocused
+                                && self.hadActivityWhileUnfocused.contains(id) {
+                                updatedNeedsAttention.insert(id)
                             }
                         }
                     }
@@ -209,49 +219,25 @@ class TabPreviewManager: ObservableObject {
         }
     }
 
-    /// Computes a hash of the image content for change detection
-    /// Uses direct pixel sampling to avoid creating large data copies
+    /// Computes a hash of the full image content for change detection.
+    /// Uses tiffRepresentation for full-resolution comparison.
+    /// Only called once every 5 seconds so memory is not an issue.
     private func computeImageHash(_ image: NSImage) -> Int {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              cgImage.width > 0 && cgImage.height > 0 else {
+        guard let tiffData = image.tiffRepresentation else {
             return 0
         }
 
-        // Create a small context to sample pixels efficiently
-        // 32x32 = 1024 samples, enough to detect small changes like spinners
-        let sampleSize = 32
-        let bitsPerComponent = 8
-        let bytesPerRow = sampleSize * 4
-
-        guard let context = CGContext(
-            data: nil,
-            width: sampleSize,
-            height: sampleSize,
-            bitsPerComponent: bitsPerComponent,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return 0
-        }
-
-        // Draw scaled-down version
-        context.interpolationQuality = .low
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: sampleSize, height: sampleSize))
-
-        guard let data = context.data else { return 0 }
-
-        // Hash the pixel data directly
         var hash = 0
-        let pixels = data.assumingMemoryBound(to: UInt8.self)
-        let totalBytes = sampleSize * sampleSize * 4
-
-        for i in stride(from: 0, to: totalBytes, by: 4) {
-            // Sample RGB, skip alpha
-            hash = hash &* 31 &+ Int(pixels[i])
-            hash = hash &* 31 &+ Int(pixels[i + 1])
-            hash = hash &* 31 &+ Int(pixels[i + 2])
+        tiffData.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            guard let base = bytes.baseAddress else { return }
+            let count = bytes.count
+            // Sample evenly across the full data
+            let step = max(1, count / 4096)
+            for i in stride(from: 0, to: count, by: step) {
+                hash = hash &* 31 &+ Int(base.load(fromByteOffset: i, as: UInt8.self))
+            }
         }
+        // tiffData is released here automatically
 
         return hash
     }

@@ -125,7 +125,6 @@ struct TabSidebarItemView: View {
     let onNewTab: () -> Void
 
     @State private var isHovering = false
-    @State private var isPulsing = false
 
     /// Whether to show the attention indicator (needs attention + not selected)
     private var showAttention: Bool {
@@ -145,16 +144,14 @@ struct TabSidebarItemView: View {
                 // Attention overlay - dark tint with bell icon
                 if showAttention {
                     RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.black.opacity(isPulsing ? 0.5 : 0.3))
+                        .fill(Color.black.opacity(0.4))
                         .frame(width: previewSize.width, height: previewSize.height)
                         .overlay(
                             Image(systemName: "bell.fill")
                                 .font(.system(size: min(previewSize.width, previewSize.height) * 0.3))
                                 .foregroundColor(.orange)
-                                .shadow(color: .orange.opacity(0.8), radius: isPulsing ? 12 : 6)
-                                .scaleEffect(isPulsing ? 1.1 : 0.9)
+                                .shadow(color: .orange.opacity(0.8), radius: 8)
                         )
-                        .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
                 }
 
                 // Top-right badges and buttons
@@ -165,9 +162,7 @@ struct TabSidebarItemView: View {
                             Circle()
                                 .fill(Color.red)
                                 .frame(width: 12, height: 12)
-                                .shadow(color: .red.opacity(0.8), radius: isPulsing ? 6 : 2)
-                                .scaleEffect(isPulsing ? 1.2 : 1.0)
-                                .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
+                                .shadow(color: .red.opacity(0.8), radius: 4)
                                 .padding(4)
                         }
 
@@ -211,7 +206,7 @@ struct TabSidebarItemView: View {
                 .foregroundColor(showAttention ? .orange : (isSelected ? .primary : .secondary))
         }
         .padding(4)
-        .background(attentionBackground)
+        .background(selectionBackground)
         .overlay(selectionBorder)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
@@ -222,24 +217,6 @@ struct TabSidebarItemView: View {
             Button("Close Tab", action: onClose)
             Divider()
             Button("New Tab", action: onNewTab)
-        }
-        .onAppear {
-            updatePulsingState()
-        }
-        .onChange(of: showAttention) { _ in
-            updatePulsingState()
-        }
-    }
-
-    private func updatePulsingState() {
-        if showAttention {
-            withAnimation(Animation.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) {
-                isPulsing = true
-            }
-        } else {
-            withAnimation(.none) {
-                isPulsing = false
-            }
         }
     }
 
@@ -265,16 +242,9 @@ struct TabSidebarItemView: View {
         item.title.isEmpty ? "Terminal" : item.title
     }
 
-    private var attentionBackground: some View {
+    private var selectionBackground: some View {
         RoundedRectangle(cornerRadius: 8)
-            .fill(
-                isSelected
-                    ? Color.accentColor.opacity(0.2)
-                    : (showAttention
-                        ? Color.orange.opacity(isPulsing ? 0.15 : 0.05)
-                        : Color.clear)
-            )
-            .animation(showAttention ? .easeInOut(duration: 0.6).repeatForever(autoreverses: true) : .default, value: isPulsing)
+            .fill(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
     }
 
     private var selectionBorder: some View {
@@ -282,13 +252,9 @@ struct TabSidebarItemView: View {
             .strokeBorder(
                 isSelected
                     ? Color.accentColor
-                    : (showAttention
-                        ? Color.orange.opacity(isPulsing ? 1.0 : 0.6)
-                        : Color.gray.opacity(0.2)),
+                    : (showAttention ? Color.orange : Color.gray.opacity(0.2)),
                 lineWidth: isSelected ? 2.5 : (showAttention ? 2.5 : 1.0)
             )
-            .shadow(color: showAttention ? Color.orange.opacity(isPulsing ? 0.6 : 0.2) : Color.clear, radius: isPulsing ? 8 : 4)
-            .animation(showAttention ? .easeInOut(duration: 0.6).repeatForever(autoreverses: true) : .default, value: isPulsing)
     }
 }
 
