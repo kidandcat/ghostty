@@ -7,15 +7,9 @@ import GhosttyKit
 
 extension Ghostty {
     /// The NSView implementation for a terminal surface.
-    class SurfaceView: OSView, ObservableObject, Codable, Identifiable {
-        typealias ID = UUID
-
-        /// Unique ID per surface
-        let id: UUID
-
+    class SurfaceView: OSSurfaceView, Codable, Identifiable {
         // The current title of the surface as defined by the pty. This can be
-        // changed with escape codes. This is public because the callbacks go
-        // to the app level and it is set from there.
+        // changed with escape codes.
         @Published private(set) var title: String = "" {
             didSet {
                 if !title.isEmpty {
@@ -25,28 +19,8 @@ extension Ghostty {
             }
         }
 
-        // The current pwd of the surface as defined by the pty. This can be
-        // changed with escape codes.
-        @Published var pwd: String?
-
-        // The cell size of this surface. This is set by the core when the
-        // surface is first created and any time the cell size changes (i.e.
-        // when the font size changes). This is used to allow windows to be
-        // resized in discrete steps of a single cell.
-        @Published var cellSize: NSSize = .zero
-
-        // The health state of the surface. This currently only reflects the
-        // renderer health. In the future we may want to make this an enum.
-        @Published var healthy: Bool = true
-
-        // Any error while initializing the surface.
-        @Published var error: Error?
-
-        // The hovered URL string
-        @Published var hoverUrl: String?
-
         // The progress report (if any)
-        @Published var progressReport: Action.ProgressReport? {
+        override var progressReport: Action.ProgressReport? {
             didSet {
                 // Cancel any existing timer
                 progressReportTimer?.invalidate()
@@ -65,11 +39,8 @@ extension Ghostty {
         // The currently active key sequence. The sequence is not active if this is empty.
         @Published var keySequence: [KeyboardShortcut] = []
 
-        // The currently active key tables. Empty if no tables are active.
-        @Published var keyTables: [String] = []
-
         // The current search state. When non-nil, the search overlay should be shown.
-        @Published var searchState: SearchState? {
+        override var searchState: SearchState? {
             didSet {
                 if let searchState {
                     // I'm not a Combine expert so if there is a better way to do this I'm
@@ -105,16 +76,18 @@ extension Ghostty {
         // Cancellable for search state needle changes
         private var searchNeedleCancellable: AnyCancellable?
 
-        // The time this surface last became focused. This is a ContinuousClock.Instant
-        // on supported platforms.
-        @Published var focusInstant: ContinuousClock.Instant?
-
-        // Returns sizing information for the surface. This is the raw C
-        // structure because I'm lazy.
-        @Published var surfaceSize: ghostty_surface_size_s?
-
         // Whether the pointer should be visible or not
         @Published private(set) var pointerStyle: CursorStyle = .horizontalText
+
+        // Whether the mouse is currently over this surface
+        @Published private(set) var mouseOverSurface: Bool = false
+
+        // The last known mouse location in the surface's local coordinate space,
+        // used by overlays such as the split drag handle reveal region.
+        @Published private(set) var mouseLocationInSurface: CGPoint?
+
+        // Whether the cursor is currently visible (not hidden by typing, etc.)
+        @Published private(set) var cursorVisible: Bool = true
 
         /// The configuration derived from the Ghostty config so we don't need to rely on references.
         @Published private(set) var derivedConfig: DerivedConfig
@@ -125,12 +98,6 @@ extension Ghostty {
 
         /// True when the bell is active. This is set inactive on focus or event.
         @Published private(set) var bell: Bool = false
-
-        /// True when the surface is in readonly mode.
-        @Published private(set) var readonly: Bool = false
-
-        /// True when the surface should show a highlight effect (e.g., when presented via goto_split).
-        @Published private(set) var highlighted: Bool = false
 
         // An initial size to request for a window. This will only affect
         // then the view is moved to a new window.
@@ -197,7 +164,7 @@ extension Ghostty {
         private(set) var surfaceModel: Ghostty.Surface?
 
         /// Returns the underlying C value for the surface. See "note" on surfaceModel.
-        var surface: ghostty_surface_t? {
+        override var surface: ghostty_surface_t? {
             surfaceModel?.unsafeCValue
         }
 
@@ -223,6 +190,10 @@ extension Ghostty {
 
         // This is set to non-null during keyDown to accumulate insertText contents
         private var keyTextAccumulator: [String]?
+
+        // True when we've consumed a left mouse-down only to move focus and
+        // should suppress the matching mouse-up from being reported.
+        private var suppressNextLeftMouseUp: Bool = false
 
         // A small delay that is introduced before a title change to avoid flickers
         private var titleChangeTimer: Timer?
@@ -250,7 +221,6 @@ extension Ghostty {
 
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             self.markedText = NSMutableAttributedString()
-            self.id = uuid ?? .init()
 
             // Our initial config always is our application wide config.
             if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
@@ -268,7 +238,7 @@ extension Ghostty {
             // Initialize with some default frame size. The important thing is that this
             // is non-zero so that our layer bounds are non-zero so that our renderer
             // can do SOMETHING.
-            super.init(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+            super.init(id: uuid, frame: NSRect(x: 0, y: 0, width: 800, height: 600))
 
             // Our cache of screen data
             cachedScreenContents = .init(duration: .milliseconds(500)) { [weak self] in
@@ -359,11 +329,6 @@ extension Ghostty {
                 object: self)
             center.addObserver(
                 self,
-                selector: #selector(ghosttyDidChangeReadonly(_:)),
-                name: .ghosttyDidChangeReadonly,
-                object: self)
-            center.addObserver(
-                self,
                 selector: #selector(windowDidChangeScreen),
                 name: NSWindow.didChangeScreenNotification,
                 object: nil)
@@ -433,10 +398,19 @@ extension Ghostty {
             progressReportTimer?.invalidate()
         }
 
-        func focusDidChange(_ focused: Bool) {
+        override func focusDidChange(_ focused: Bool) {
             guard let surface = self.surface else { return }
             guard self.focused != focused else { return }
             self.focused = focused
+
+            // If we lost our focus then remove the mouse event suppression so
+            // our mouse release event leaving the surface can properly be
+            // sent to stop things like mouse selection.
+            if !focused {
+                suppressNextLeftMouseUp = false
+            }
+
+            // Notify libghostty
             ghostty_surface_set_focus(surface, focused)
 
             // Update our secure input state if we are a password input
@@ -461,7 +435,7 @@ extension Ghostty {
             }
         }
 
-        func sizeDidChange(_ size: CGSize) {
+        override func sizeDidChange(_ size: CGSize) {
             // Ghostty wants to know the actual framebuffer size... It is very important
             // here that we use "size" and NOT the view frame. If we're in the middle of
             // an animation (i.e. a fullscreen animation), the frame will not yet be updated.
@@ -542,6 +516,7 @@ extension Ghostty {
         }
 
         func setCursorVisibility(_ visible: Bool) {
+            cursorVisible = visible
             // Technically this action could be called anytime we want to
             // change the mouse visibility but at the time of writing this
             // mouse-hide-while-typing is the only use case so this is the
@@ -637,21 +612,47 @@ extension Ghostty {
         }
 
         private func localEventLeftMouseDown(_ event: NSEvent) -> NSEvent? {
+            let isCommandPaletteVisible = (event.window?.windowController as? BaseTerminalController)?
+                .commandPaletteIsShowing == true
+            guard !isCommandPaletteVisible else {
+                // We don't want to process events that
+                // are supposed to be handled by CommandPaletteView
+                return event
+            }
+
             // We only want to process events that are on this window.
             guard let window,
                   event.window != nil,
                   window == event.window else { return event }
 
             // The clicked location in this window should be this view.
-            let location = convert(event.locationInWindow, from: nil)
-            guard hitTest(location) == self else { return event }
+            guard
+                let location = window.contentView?.convert(event.locationInWindow, from: nil)
+            else {
+                return event
+            }
+            // We should use window to perform hitTest here,
+            // because there could be some other overlays on top, like search bar
+            guard window.contentView?.hitTest(location) == self else { return event }
 
-            // We only want to grab focus if either our app or window was
-            // not focused.
-            guard !NSApp.isActive || !window.isKeyWindow else { return event }
+            // We always assume that we're resetting our mouse suppression
+            // unless we see the specific scenario below to set it.
+            suppressNextLeftMouseUp = false
 
-            // If we're already focused we do nothing
-            guard !focused else { return event }
+            // If we're already the first responder then no focus transfer is
+            // happening, so the click should continue as normal.
+            guard window.firstResponder !== self else {
+                return event
+            }
+
+            // If our window/app is already focused, then this click is only
+            // being used to transfer split focus. Consume it so it does not
+            // get forwarded to the terminal as a mouse click.
+            if NSApp.isActive && window.isKeyWindow {
+                window.makeFirstResponder(self)
+                suppressNextLeftMouseUp = true
+                return nil
+            }
 
             // Make ourselves the first responder
             window.makeFirstResponder(self)
@@ -680,7 +681,7 @@ extension Ghostty {
             guard let healthAny = notification.userInfo?["health"] else { return }
             guard let health = healthAny as? ghostty_action_renderer_health_e else { return }
             DispatchQueue.main.async { [weak self] in
-                self?.healthy = health == GHOSTTY_RENDERER_HEALTH_OK
+                self?.healthy = health == GHOSTTY_RENDERER_HEALTH_HEALTHY
             }
         }
 
@@ -746,11 +747,6 @@ extension Ghostty {
         @objc private func ghosttyBellDidRing(_ notification: SwiftUI.Notification) {
             // Bell state goes to true
             bell = true
-        }
-
-        @objc private func ghosttyDidChangeReadonly(_ notification: SwiftUI.Notification) {
-            guard let value = notification.userInfo?[SwiftUI.Notification.Name.ReadonlyKey] as? Bool else { return }
-            readonly = value
         }
 
         @objc private func windowDidChangeScreen(notification: SwiftUI.Notification) {
@@ -856,6 +852,13 @@ extension Ghostty {
         }
 
         override func mouseUp(with event: NSEvent) {
+            // If this mouse-up corresponds to a focus-only click transfer,
+            // suppress it so we don't emit a release without a press.
+            if suppressNextLeftMouseUp {
+                suppressNextLeftMouseUp = false
+                return
+            }
+
             // Always reset our pressure when the mouse goes up
             prevPressureStage = 0
 
@@ -919,7 +922,11 @@ extension Ghostty {
         }
 
         override func mouseEntered(with event: NSEvent) {
+            mouseOverSurface = true
             super.mouseEntered(with: event)
+
+            let pos = self.convert(event.locationInWindow, from: nil)
+            mouseLocationInSurface = pos
 
             guard let surfaceModel else { return }
 
@@ -927,7 +934,6 @@ extension Ghostty {
             // super important because we set it to -1/-1 on mouseExit and
             // lots of mouse logic (i.e. whether to send mouse reports) depend
             // on the position being in the viewport if it is.
-            let pos = self.convert(event.locationInWindow, from: nil)
             let mouseEvent = Ghostty.Input.MousePosEvent(
                 x: pos.x,
                 y: frame.height - pos.y,
@@ -937,6 +943,8 @@ extension Ghostty {
         }
 
         override func mouseExited(with event: NSEvent) {
+            mouseOverSurface = false
+            mouseLocationInSurface = nil
             guard let surfaceModel else { return }
 
             // If the mouse is being dragged then we don't have to emit
@@ -956,10 +964,12 @@ extension Ghostty {
         }
 
         override func mouseMoved(with event: NSEvent) {
+            let pos = self.convert(event.locationInWindow, from: nil)
+            mouseLocationInSurface = pos
+
             guard let surfaceModel else { return }
 
             // Convert window position to view position. Note (0, 0) is bottom left.
-            let pos = self.convert(event.locationInWindow, from: nil)
             let mouseEvent = Ghostty.Input.MousePosEvent(
                 x: pos.x,
                 y: frame.height - pos.y,
@@ -1029,7 +1039,7 @@ extension Ghostty {
 
             // If the user has force click enabled then we do a quick look. There
             // is no public API for this as far as I can tell.
-            guard UserDefaults.standard.bool(forKey: "com.apple.trackpad.forceClick") else { return }
+            guard UserDefaults.ghostty.bool(forKey: "com.apple.trackpad.forceClick") else { return }
             quickLook(with: event)
         }
 
@@ -1224,7 +1234,8 @@ extension Ghostty {
                    keyTables.isEmpty,
                    bindingFlags.isDisjoint(with: [.all, .performable]),
                    bindingFlags.contains(.consumed) {
-                    if let menu = NSApp.mainMenu, menu.performKeyEquivalent(with: event) {
+                    if let appDelegate = NSApp.delegate as? AppDelegate,
+                       appDelegate.performGhosttyBindingMenuKeyEquivalent(with: event) {
                         return true
                     }
                 }
@@ -1552,19 +1563,11 @@ extension Ghostty {
         }
 
         @IBAction func findNext(_ sender: Any?) {
-            guard let surface = self.surface else { return }
-            let action = "search:next"
-            if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
-                AppDelegate.logger.warning("action failed action=\(action)")
-            }
+            _ = self.navigateSearchToNext()
         }
 
         @IBAction func findPrevious(_ sender: Any?) {
-            guard let surface = self.surface else { return }
-            let action = "search:previous"
-            if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
-                AppDelegate.logger.warning("action failed action=\(action)")
-            }
+            _ = navigateSearchToPrevious()
         }
 
         @IBAction func findHide(_ sender: Any?) {
@@ -1580,14 +1583,6 @@ extension Ghostty {
             let action = "toggle_readonly"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
                 AppDelegate.logger.warning("action failed action=\(action)")
-            }
-        }
-
-        /// Triggers a brief highlight animation on this surface.
-        func highlight() {
-            highlighted = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                self?.highlighted = false
             }
         }
 
@@ -1632,14 +1627,17 @@ extension Ghostty {
         }
 
         /// Show a user notification and associate it with this surface
-        func showUserNotification(title: String, body: String) {
+        func showUserNotification(title: String, body: String, requireFocus: Bool = true) {
             let content = UNMutableNotificationContent()
             content.title = title
             content.subtitle = self.title
             content.body = body
             content.sound = UNNotificationSound.default
             content.categoryIdentifier = Ghostty.userNotificationCategory
-            content.userInfo = ["surface": self.id.uuidString]
+            content.userInfo = [
+                "surface": self.id.uuidString,
+                "requireFocus": requireFocus,
+            ]
 
             let uuid = UUID().uuidString
             let request = UNNotificationRequest(
@@ -1952,21 +1950,7 @@ extension Ghostty.SurfaceView: NSTextInputClient {
            let current = NSApp.currentEvent,
            lastPerformKeyEvent == current.timestamp {
             NSApp.sendEvent(current)
-            return
         }
-
-		guard let surfaceModel else { return }
-        // Process MacOS native scroll events
-        switch selector {
-        case #selector(moveToBeginningOfDocument(_:)):
-            _ = surfaceModel.perform(action: "scroll_to_top")
-        case #selector(moveToEndOfDocument(_:)):
-            _ = surfaceModel.perform(action: "scroll_to_bottom")
-        default:
-            break
-        }
-
-        print("SEL: \(selector)")
     }
 
     /// Sync the preedit state based on the markedText value to libghostty

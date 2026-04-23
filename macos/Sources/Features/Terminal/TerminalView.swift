@@ -47,9 +47,8 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
     // An optional delegate to receive information about terminal changes.
     weak var delegate: (any TerminalViewDelegate)?
 
-    // The most recently focused surface, equal to focusedSurface when
-    // it is non-nil.
-    @State private var lastFocusedSurface: Weak<Ghostty.SurfaceView> = .init()
+    /// The most recently focused surface, equal to `focusedSurface` when it is non-nil.
+    @State private var lastFocusedSurface: Weak<Ghostty.SurfaceView>?
 
     // This seems like a crutch after switching from SwiftUI to AppKit lifecycle.
     @FocusState private var focused: Bool
@@ -165,6 +164,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                     Ghostty.InspectableSurface(surfaceView: selectedSurface, isSplit: false)
                         .id(selectedID) // Force view recreation when selected tab changes
                         .environmentObject(ghostty)
+                        .ghosttyLastFocusedSurface(lastFocusedSurface)
                         .focused($focused)
                         .onAppear { self.focused = true }
                         .onChange(of: focusedSurface) { newValue in
@@ -190,9 +190,9 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         .onAppear { self.focused = true }
                 }
             }
-            .ignoresSafeArea(.container, edges: ghostty.config.macosTitlebarStyle == "hidden" ? .top : [])
+            .ignoresSafeArea(.container, edges: ghostty.config.macosTitlebarStyle == .hidden ? .top : [])
 
-            if let surfaceView = lastFocusedSurface.value {
+            if let surfaceView = lastFocusedSurface?.value {
                 TerminalCommandPaletteView(
                     surfaceView: surfaceView,
                     isPresented: $viewModel.commandPaletteIsShowing,
@@ -243,13 +243,13 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         guard let size = newValue else { return }
                         self.delegate?.cellSizeDidChange(to: size)
                     }
-                    .frame(idealWidth: lastFocusedSurface.value?.initialSize?.width,
-                           idealHeight: lastFocusedSurface.value?.initialSize?.height)
+                    .frame(idealWidth: lastFocusedSurface?.value?.initialSize?.width,
+                           idealHeight: lastFocusedSurface?.value?.initialSize?.height)
             }
             // Ignore safe area to extend up in to the titlebar region if we have the "hidden" titlebar style
-            .ignoresSafeArea(.container, edges: ghostty.config.macosTitlebarStyle == "hidden" ? .top : [])
+            .ignoresSafeArea(.container, edges: ghostty.config.macosTitlebarStyle == .hidden ? .top : [])
 
-            if let surfaceView = lastFocusedSurface.value {
+            if let surfaceView = lastFocusedSurface?.value {
                 TerminalCommandPaletteView(
                     surfaceView: surfaceView,
                     isPresented: $viewModel.commandPaletteIsShowing,
@@ -322,7 +322,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
         let targetSurface: Ghostty.SurfaceView?
         if let selectedID = selectedSurfaceID, let surface = findSurface(by: selectedID) {
             targetSurface = surface
-        } else if let surface = lastFocusedSurface.value {
+        } else if let surface = lastFocusedSurface?.value {
             targetSurface = surface
         } else {
             targetSurface = Array(viewModel.surfaceTree).first

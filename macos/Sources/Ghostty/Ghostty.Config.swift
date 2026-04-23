@@ -45,6 +45,10 @@ extension Ghostty {
             self.init(config: ghostty_config_clone(config))
         }
 
+        func clone(config: ghostty_config_t) {
+            self.config = config
+        }
+
         deinit {
             self.config = nil
         }
@@ -53,7 +57,7 @@ extension Ghostty {
         /// - Parameters:
         ///   - path: An optional preferred config file path. Pass `nil` to load the default configuration files.
         ///   - finalize: Whether to finalize the configuration to populate default values.
-        static private func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
+        static func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
             // Initialize the global configuration.
             guard let cfg = ghostty_config_new() else {
                 logger.critical("ghostty_config_new failed")
@@ -132,6 +136,49 @@ extension Ghostty {
             let key = "bell-features"
             guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return .init() }
             return .init(rawValue: v)
+        }
+
+        var bellAudioPath: ConfigPath? {
+            guard let config = self.config else { return nil }
+            var v = ghostty_config_path_s()
+            let key = "bell-audio-path"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return nil }
+            let path = String(cString: v.path)
+            return path.isEmpty ? nil : ConfigPath(path: path, optional: v.optional)
+        }
+
+        var bellAudioVolume: Float {
+            guard let config = self.config else { return 0.5 }
+            var v: Double = 0.5
+            let key = "bell-audio-volume"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return Float(v)
+        }
+
+        var notifyOnCommandFinish: NotifyOnCommandFinish {
+            guard let config = self.config else { return .never }
+            var v: UnsafePointer<Int8>?
+            let key = "notify-on-command-finish"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return .never }
+            guard let ptr = v else { return .never }
+            return NotifyOnCommandFinish(rawValue: String(cString: ptr)) ?? .never
+        }
+
+        var notifyOnCommandFinishAction: NotifyOnCommandFinishAction {
+            let defaultValue = NotifyOnCommandFinishAction.bell
+            guard let config = self.config else { return defaultValue }
+            var v: CUnsignedInt = 0
+            let key = "notify-on-command-finish-action"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
+            return .init(rawValue: v)
+        }
+
+        var notifyOnCommandFinishAfter: Duration {
+            guard let config = self.config else { return .seconds(5) }
+            var v: UInt = 0
+            let key = "notify-on-command-finish-after"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return .milliseconds(v)
         }
 
         var splitPreserveZoom: SplitPreserveZoom {
@@ -311,14 +358,14 @@ extension Ghostty {
             return MacOSWindowButtons(rawValue: str) ?? defaultValue
         }
 
-        var macosTitlebarStyle: String {
-            let defaultValue = "transparent"
+        var macosTitlebarStyle: MacOSTitlebarStyle {
+            let defaultValue = MacOSTitlebarStyle.transparent
             guard let config = self.config else { return defaultValue }
             var v: UnsafePointer<Int8>?
             let key = "macos-titlebar-style"
             guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return defaultValue }
             guard let ptr = v else { return defaultValue }
-            return String(cString: ptr)
+            return MacOSTitlebarStyle(rawValue: String(cString: ptr)) ?? defaultValue
         }
 
         var macosTabSidebar: Bool {
@@ -643,6 +690,14 @@ extension Ghostty {
             return v
         }
 
+        var macosAppleScript: Bool {
+            guard let config = self.config else { return true }
+            var v = false
+            let key = "macos-applescript"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
+        }
+
         var maximize: Bool {
             guard let config = self.config else { return true }
             var v = false
@@ -681,6 +736,14 @@ extension Ghostty {
             guard v.len > 0 else { return [] }
             let buffer = UnsafeBufferPointer(start: v.commands, count: v.len)
             return buffer.map { Ghostty.Command(cValue: $0) }
+        }
+
+        var progressStyle: Bool {
+            guard let config = self.config else { return true }
+            var v = true
+            let key = "progress-style"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
         }
     }
 }
@@ -849,5 +912,23 @@ extension Ghostty.Config {
             case .none: return false
             }
         }
+    }
+
+    enum NotifyOnCommandFinish: String {
+        case never
+        case unfocused
+        case always
+    }
+
+    struct NotifyOnCommandFinishAction: OptionSet {
+        let rawValue: CUnsignedInt
+
+        static let bell = NotifyOnCommandFinishAction(rawValue: 1 << 0)
+        static let notify = NotifyOnCommandFinishAction(rawValue: 1 << 1)
+    }
+
+    enum MacOSTitlebarStyle: String {
+        static let `default` = MacOSTitlebarStyle.transparent
+        case native, transparent, tabs, hidden
     }
 }
